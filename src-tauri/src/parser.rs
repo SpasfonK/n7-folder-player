@@ -25,6 +25,20 @@ static RE_TRACK_FILENAME: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"^(?:(\d{1,2})[-_.](\d{1,3})|(\d{1,3}))\s*[-_–—.\s]+\s*(.+)$").unwrap()
 });
 
+const CATEGORY_FOLDER_PATTERN: &str = r"(?i)^(?:\d+\s*[-_.]\s*)?(?:albums?(?:\s+studio)?|live|box\s*sets?|singles?(?:\s*&\s*eps?)?|eps?|compilations?|ost|soundtracks?|bootlegs?|b[\s\-]*sides?)$";
+static RE_CATEGORY_FOLDER: Lazy<Regex> = Lazy::new(|| Regex::new(CATEGORY_FOLDER_PATTERN).unwrap());
+
+const JUNK_TAG_ALTERNATION: &str = r"(?:full\s*album|hi[\s\-_]*res|web[\s\-_]*flac|web[\s\-_]*rip|flac|320\s*kbps?|v0|cd[\s\-_]*rip|remaster(?:ed)?|deluxe(?:\s*edition)?|official|officiel)";
+static RE_JUNK_TAG_LEADING: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(&format!(r"(?i)^\s*[\[\(]\s*{}\s*[\]\)]\s*", JUNK_TAG_ALTERNATION)).unwrap()
+});
+static RE_JUNK_TAG_TRAILING: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(&format!(r"(?i)\s*[\[\(]\s*{}\s*[\]\)]\s*$", JUNK_TAG_ALTERNATION)).unwrap()
+});
+static RE_AUDIO_EXT_SUFFIX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)\.(?:mp3|flac|wav|ogg|opus|m4a|aac|wv|aiff|alac|ape|wma)$").unwrap()
+});
+
 const GENERIC_CONTAINERS: &[&str] = &[
     "musique", "music", "audio", "sons", "mp3", "flac", "wav", "ogg", "m4a", "alac",
     "lossless", "hires", "rock", "metal", "hardrock", "heavy", "hardcore", "pop",
@@ -60,6 +74,9 @@ pub fn is_generic_folder(segment: &str) -> bool {
     if trimmed.is_empty() || RE_PURE_YEAR.is_match(trimmed) {
         return true;
     }
+    if RE_CATEGORY_FOLDER.is_match(trimmed) {
+        return true;
+    }
     let k = keyify(trimmed);
     if k.is_empty() {
         return true;
@@ -68,6 +85,21 @@ pub fn is_generic_folder(segment: &str) -> bool {
         return true;
     }
     GENERIC_CONTAINERS.contains(&k.as_str())
+}
+
+pub fn clean_segment(raw: &str) -> String {
+    let mut current = raw.trim().to_string();
+    for _ in 0..4 {
+        let mut next = RE_JUNK_TAG_LEADING.replace_all(&current, "").to_string();
+        next = RE_JUNK_TAG_TRAILING.replace_all(&next, "").to_string();
+        next = RE_AUDIO_EXT_SUFFIX.replace_all(&next, "").to_string();
+        let next = next.trim().trim_end_matches('.').trim().to_string();
+        if next == current {
+            break;
+        }
+        current = next;
+    }
+    current
 }
 
 fn extract_year_and_clean(raw: &str) -> (String, Option<u32>) {
@@ -148,16 +180,20 @@ pub fn parse_track_path(file_path: &Path, root_path: Option<&Path>) -> ParsedTra
     let mut meaningful_dirs: Vec<String> = Vec::new();
 
     for dir in segments {
-        if let Some(caps) = RE_PURE_YEAR.captures(dir.trim()) {
+        let cleaned_dir = clean_segment(&dir);
+        if cleaned_dir.is_empty() {
+            continue;
+        }
+        if let Some(caps) = RE_PURE_YEAR.captures(&cleaned_dir) {
             if let Some(yr) = caps.get(1).and_then(|m| m.as_str().parse::<u32>().ok()) {
                 detected_year = Some(yr);
             }
             continue;
         }
-        if is_generic_folder(&dir) {
+        if is_generic_folder(&cleaned_dir) {
             continue;
         }
-        meaningful_dirs.push(dir);
+        meaningful_dirs.push(cleaned_dir);
     }
 
     let mut disc_no: u32 = 1;
@@ -229,6 +265,9 @@ pub fn parse_track_path(file_path: &Path, root_path: Option<&Path>) -> ParsedTra
 
     let (clean_artist, mut featured_guest) = strip_collaborators(&raw_artist);
     raw_artist = clean_artist;
+
+    raw_artist = clean_segment(&raw_artist);
+    raw_album = clean_segment(&raw_album);
 
     let mut track_no: u32 = 0;
     let mut raw_title = file_stem.trim().to_string();
@@ -351,5 +390,69 @@ mod tests {
         assert_eq!(r1.album_key, r2.album_key);
         assert_eq!(r1.disc_no, 1);
         assert_eq!(r2.disc_no, 2);
+    }
+
+    #[test]
+    fn test_numbered_category_folders_are_excluded() {
+        let root = Path::new(r"D:\Musique");
+        let p = Path::new(r"D:\Musique\Alpha Blondy\1 - Albums Studio\1994 - Jerusalem\01 - Jerusalem.flac");
+        let res = parse_track_path(p, Some(root));
+        assert_eq!(res.artist_name, "Alpha Blondy");
+        assert_eq!(res.album_title, "Jerusalem");
+        assert_eq!(res.year, Some(1994));
+        assert_eq!(res.artist_key, "alphablondy");
+    }
+
+    #[test]
+    fn test_live_category_folder_is_excluded() {
+        let root = Path::new(r"D:\Musique");
+        let p = Path::new(r"D:\Musique\Iam\2 - Live\2005 - Live au Zenith\01 - Intro.flac");
+        let res = parse_track_path(p, Some(root));
+        assert_eq!(res.artist_name, "Iam");
+        assert_eq!(res.album_title, "Live au Zenith");
+        assert_eq!(res.year, Some(2005));
+    }
+
+    #[test]
+    fn test_category_containers_are_flagged_generic() {
+        assert!(is_generic_folder("1 - Albums Studio"));
+        assert!(is_generic_folder("2 - Live"));
+        assert!(is_generic_folder("3 - BoxSet"));
+        assert!(is_generic_folder("3 - Singles"));
+        assert!(is_generic_folder("4 - Singles & EPs"));
+        assert!(is_generic_folder("Bootlegs"));
+        assert!(is_generic_folder("OST"));
+        assert!(is_generic_folder("Soundtracks"));
+        assert!(is_generic_folder("B-Sides"));
+        assert!(!is_generic_folder("Alpha Blondy"));
+        assert!(!is_generic_folder("Jerusalem"));
+        assert!(!is_generic_folder("Iam"));
+    }
+
+    #[test]
+    fn test_audio_extension_in_folder_name_merges_artists() {
+        let root = Path::new(r"D:\Musique");
+        let clean = Path::new(r"D:\Musique\Alpha Blondy\1994 - Jerusalem\01 - Jerusalem.flac");
+        let polluted = Path::new(r"D:\Musique\Alpha Blondy.flac\1994 - Jerusalem\01 - Jerusalem.flac");
+        let a = parse_track_path(clean, Some(root));
+        let b = parse_track_path(polluted, Some(root));
+        assert_eq!(a.artist_name, "Alpha Blondy");
+        assert_eq!(b.artist_name, "Alpha Blondy");
+        assert_eq!(a.artist_key, b.artist_key);
+        assert_eq!(b.artist_key, "alphablondy");
+    }
+
+    #[test]
+    fn test_bracket_tag_noise_is_pruned() {
+        assert_eq!(clean_segment("[Hi-Res] Alpha Blondy"), "Alpha Blondy");
+        assert_eq!(clean_segment("Alpha Blondy [Full album]"), "Alpha Blondy");
+        assert_eq!(clean_segment("Alpha Blondy.flac"), "Alpha Blondy");
+
+        let root = Path::new(r"D:\Musique");
+        let p = Path::new(r"D:\Musique\Alpha Blondy\[Hi-Res] 1994 - Jerusalem [WEB FLAC]\01 - Jerusalem.flac");
+        let res = parse_track_path(p, Some(root));
+        assert_eq!(res.artist_name, "Alpha Blondy");
+        assert_eq!(res.album_title, "Jerusalem");
+        assert_eq!(res.year, Some(1994));
     }
 }

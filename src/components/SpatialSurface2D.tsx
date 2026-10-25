@@ -14,8 +14,56 @@ interface SpatialNode {
   height: number;
 }
 
+interface LetterAnchor {
+  letter: string;
+  x: number;
+  y: number;
+}
+
+interface ToroidalLayout {
+  nodes: SpatialNode[];
+  letterAnchors: LetterAnchor[];
+  worldWidth: number;
+  worldHeight: number;
+}
+
+interface RenderInstance {
+  id: string;
+  node: SpatialNode;
+  worldX: number;
+  worldY: number;
+  opacity: number;
+  scale: number;
+}
+
 const CELL_W = 430;
 const CELL_H = 295;
+const CARD_W = 390;
+const CARD_H = 255;
+
+const MIN_ZOOM = 0.3;
+const MAX_ZOOM = 3.2;
+
+const FADE_START = 0.82;
+const EDGE_OPACITY = 0.15;
+const EDGE_SCALE = 0.88;
+const CULL_MARGIN = 260;
+
+const wrap = (value: number, size: number): number => {
+  if (size <= 0) return 0;
+  const m = value % size;
+  return m < 0 ? m + size : m;
+};
+
+const wrapDelta = (delta: number, size: number): number => {
+  const m = wrap(delta, size);
+  return m > size / 2 ? m - size : m;
+};
+
+const hash2 = (a: number, b: number): number => {
+  const s = Math.sin(a * 127.1 + b * 311.7) * 43758.5453;
+  return s - Math.floor(s);
+};
 
 export const SpatialSurface2D: React.FC<{
   JumpToLetterRef: React.MutableRefObject<((letter: string) => void) | null>;
@@ -36,11 +84,12 @@ export const SpatialSurface2D: React.FC<{
 
   const [renderCam, setRenderCam] = useState({ x: 0, y: 0, zoom: 0.85 });
   const [viewportSize, setViewportSize] = useState({ w: 1280, h: 720 });
-  const [hoveredArtistKey, setHoveredArtistKey] = useState<string | null>(null);
+  const [hoveredInstanceId, setHoveredInstanceId] = useState<string | null>(null);
 
-  const { nodes, letterAnchors } = useMemo(() => {
+  const layout = useMemo<ToroidalLayout>(() => {
     const q = searchQuery.trim().toLowerCase();
     const filtered = q ? artists.filter((a) => a.display_name.toLowerCase().includes(q)) : artists;
+
     const albumsByArtist = new Map<string, AlbumSummary[]>();
     for (const alb of albums) {
       const list = albumsByArtist.get(alb.artist_key) || [];
@@ -48,40 +97,66 @@ export const SpatialSurface2D: React.FC<{
       albumsByArtist.set(alb.artist_key, list);
     }
 
-    const total = Math.max(1, filtered.length);
-    const cols = Math.max(4, Math.ceil(Math.sqrt(total * 1.45)));
+    const total = filtered.length;
+    const cols = Math.max(1, Math.ceil(Math.sqrt(Math.max(1, total) * 1.45)));
+    const rows = Math.max(1, Math.ceil(Math.max(1, total) / cols));
+    const worldWidth = cols * CELL_W;
+    const worldHeight = rows * CELL_H;
+    const cellCount = cols * rows;
+
     const computedNodes: SpatialNode[] = [];
-    const anchorsMap = new Map<string, { letter: string; x: number; y: number }>();
+    const anchorsMap = new Map<string, LetterAnchor>();
 
     filtered.forEach((artist, index) => {
-      const col = index % cols;
-      const row = Math.floor(index / cols);
-      const x = (col - cols / 2) * CELL_W + (row % 2 === 1 ? CELL_W * 0.35 : 0);
-      const y = (row - Math.ceil(total / cols) / 2) * CELL_H;
+      const cellIndex = total > 0 ? Math.floor((index * cellCount) / total) : 0;
+      const col = cellIndex % cols;
+      const row = Math.floor(cellIndex / cols);
+      const stagger = row % 2 === 1 ? CELL_W * 0.5 : 0;
+      const jitterX = (hash2(col, row) - 0.5) * CELL_W * 0.09;
+      const jitterY = (hash2(row + 11, col + 29) - 0.5) * CELL_H * 0.1;
+      const x = wrap(col * CELL_W + stagger + jitterX, worldWidth);
+      const y = wrap(row * CELL_H + jitterY, worldHeight);
+
       computedNodes.push({
         artist,
         albums: albumsByArtist.get(artist.artist_key) || [],
-        x, y, width: 390, height: 255,
+        x,
+        y,
+        width: CARD_W,
+        height: CARD_H,
       });
+
       if (!anchorsMap.has(artist.first_letter)) {
         anchorsMap.set(artist.first_letter, { letter: artist.first_letter, x, y });
       }
     });
 
-    return { nodes: computedNodes, letterAnchors: Array.from(anchorsMap.values()) };
+    return {
+      nodes: computedNodes,
+      letterAnchors: Array.from(anchorsMap.values()),
+      worldWidth,
+      worldHeight,
+    };
   }, [artists, albums, searchQuery]);
+
+  const { nodes, letterAnchors, worldWidth, worldHeight } = layout;
+
+  const layoutRef = useRef(layout);
+  useEffect(() => {
+    layoutRef.current = layout;
+  }, [layout]);
 
   useEffect(() => {
     JumpToLetterRef.current = (letter: string) => {
       const anchor = letterAnchors.find((a) => a.letter === letter);
-      if (anchor) {
-        camRef.current.targetX = -anchor.x;
-        camRef.current.targetY = -anchor.y;
-        camRef.current.targetZoom = Math.max(camRef.current.zoom, 1.15);
-        camRef.current.vx = 0; camRef.current.vy = 0;
-      }
+      if (!anchor) return;
+      const c = camRef.current;
+      c.targetX = c.x + wrapDelta(-anchor.x - c.x, worldWidth);
+      c.targetY = c.y + wrapDelta(-anchor.y - c.y, worldHeight);
+      c.targetZoom = Math.max(c.zoom, 1.15);
+      c.vx = 0; c.vy = 0;
     };
-  }, [letterAnchors, JumpToLetterRef]);
+  }, [letterAnchors, worldWidth, worldHeight, JumpToLetterRef]);
 
   useEffect(() => {
     const el = viewportRef.current;
@@ -99,11 +174,15 @@ export const SpatialSurface2D: React.FC<{
     let animId: number;
     const tick = () => {
       const c = camRef.current;
+      const { worldWidth: ww, worldHeight: wh, letterAnchors: anchors } = layoutRef.current;
+
       if (c.targetX !== null && c.targetY !== null) {
-        c.x += (c.targetX - c.x) * 0.14;
-        c.y += (c.targetY - c.y) * 0.14;
+        const dx = wrapDelta(c.targetX - c.x, ww);
+        const dy = wrapDelta(c.targetY - c.y, wh);
+        c.x += dx * 0.14;
+        c.y += dy * 0.14;
         if (c.targetZoom !== null) c.zoom += (c.targetZoom - c.zoom) * 0.14;
-        if (Math.abs(c.targetX - c.x) < 1.5 && Math.abs(c.targetY - c.y) < 1.5) {
+        if (Math.abs(dx) < 1.5 && Math.abs(dy) < 1.5) {
           c.targetX = null; c.targetY = null; c.targetZoom = null;
         }
       } else if (!c.isDragging) {
@@ -111,6 +190,12 @@ export const SpatialSurface2D: React.FC<{
           c.x += c.vx; c.y += c.vy; c.vx *= 0.91; c.vy *= 0.91;
         } else { c.vx = 0; c.vy = 0; }
       }
+
+      if (Math.abs(c.x) > ww * 64) c.x = wrap(c.x, ww);
+      if (Math.abs(c.y) > wh * 64) c.y = wrap(c.y, wh);
+
+      const wrappedX = wrap(c.x, ww);
+      const wrappedY = wrap(c.y, wh);
 
       const canvas = canvasRef.current;
       if (canvas) {
@@ -121,39 +206,101 @@ export const SpatialSurface2D: React.FC<{
           ctx.save();
           ctx.font = `800 ${Math.round(140 * c.zoom)}px "Segoe UI", sans-serif`;
           ctx.fillStyle = "rgba(0, 210, 255, 0.06)";
-          for (const anchor of letterAnchors) {
-            const sx = w / 2 + (anchor.x + c.x) * c.zoom;
-            const sy = h / 2 + (anchor.y + c.y) * c.zoom;
-            if (sx > -300 && sx < w + 300 && sy > -300 && sy < h + 300) {
-              ctx.fillText(anchor.letter, sx - 50 * c.zoom, sy);
+          const spanX = w / 2 / c.zoom;
+          const spanY = h / 2 / c.zoom;
+          const txMin = Math.floor((-wrappedX - spanX) / ww) - 1;
+          const txMax = Math.floor((-wrappedX + spanX) / ww) + 1;
+          const tyMin = Math.floor((-wrappedY - spanY) / wh) - 1;
+          const tyMax = Math.floor((-wrappedY + spanY) / wh) + 1;
+          for (let tx = txMin; tx <= txMax; tx++) {
+            for (let ty = tyMin; ty <= tyMax; ty++) {
+              for (const anchor of anchors) {
+                const sx = w / 2 + (anchor.x + tx * ww + wrappedX) * c.zoom;
+                const sy = h / 2 + (anchor.y + ty * wh + wrappedY) * c.zoom;
+                if (sx > -300 && sx < w + 300 && sy > -300 && sy < h + 300) {
+                  ctx.fillText(anchor.letter, sx - 50 * c.zoom, sy);
+                }
+              }
             }
           }
           ctx.restore();
         }
       }
-      setRenderCam({ x: c.x, y: c.y, zoom: c.zoom });
+
+      setRenderCam({ x: wrappedX, y: wrappedY, zoom: c.zoom });
       animId = requestAnimationFrame(tick);
     };
     animId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(animId);
-  }, [viewportSize, letterAnchors]);
+  }, [viewportSize]);
 
-  const visibleNodes = useMemo(() => {
+  const tileRange = useMemo(() => {
     const { w, h } = viewportSize;
     const { x, y, zoom } = renderCam;
-    const margin = 340;
-    return nodes.filter((n) => {
-      const sx = w / 2 + (n.x + x) * zoom;
-      const sy = h / 2 + (n.y + y) * zoom;
-      return sx + n.width * zoom > -margin && sx - n.width * zoom < w + margin &&
-             sy + n.height * zoom > -margin && sy - n.height * zoom < h + margin;
-    });
-  }, [nodes, viewportSize, renderCam]);
+    const spanX = w / 2 / zoom;
+    const spanY = h / 2 / zoom;
+    return {
+      txMin: Math.floor((-x - spanX) / worldWidth) - 1,
+      txMax: Math.floor((-x + spanX) / worldWidth) + 1,
+      tyMin: Math.floor((-y - spanY) / worldHeight) - 1,
+      tyMax: Math.floor((-y + spanY) / worldHeight) + 1,
+    };
+  }, [viewportSize, renderCam, worldWidth, worldHeight]);
+
+  const renderInstances = useMemo<RenderInstance[]>(() => {
+    const { w, h } = viewportSize;
+    const { x, y, zoom } = renderCam;
+    const halfW = w / 2;
+    const halfH = h / 2;
+    const instances: RenderInstance[] = [];
+
+    for (let tx = tileRange.txMin; tx <= tileRange.txMax; tx++) {
+      for (let ty = tileRange.tyMin; ty <= tileRange.tyMax; ty++) {
+        const offsetX = tx * worldWidth;
+        const offsetY = ty * worldHeight;
+
+        for (const node of nodes) {
+          const worldX = node.x + offsetX;
+          const worldY = node.y + offsetY;
+          const boxW = node.width * zoom;
+          const boxH = node.height * zoom;
+          const screenLeft = halfW + (worldX + x) * zoom;
+          const screenTop = halfH + (worldY + y) * zoom;
+          const centerX = screenLeft + boxW / 2;
+          const centerY = screenTop + boxH / 2;
+
+          if (centerX + boxW / 2 < -CULL_MARGIN || centerX - boxW / 2 > w + CULL_MARGIN) continue;
+          if (centerY + boxH / 2 < -CULL_MARGIN || centerY - boxH / 2 > h + CULL_MARGIN) continue;
+
+          const nx = halfW > 0 ? (centerX - halfW) / halfW : 0;
+          const ny = halfH > 0 ? (centerY - halfH) / halfH : 0;
+          const radial = Math.min(1, Math.sqrt(nx * nx + ny * ny) / Math.SQRT2);
+          const falloff = Math.max(0, Math.min(1, (radial - FADE_START) / (1 - FADE_START)));
+
+          instances.push({
+            id: `${node.artist.artist_key}#${tx}:${ty}`,
+            node,
+            worldX,
+            worldY,
+            opacity: 1 - falloff * (1 - EDGE_OPACITY),
+            scale: 1 - falloff * (1 - EDGE_SCALE),
+          });
+        }
+      }
+    }
+
+    return instances;
+  }, [nodes, viewportSize, renderCam, tileRange, worldWidth, worldHeight]);
+
+  const showCoversLayer = renderCam.zoom >= 0.95;
 
   useEffect(() => {
     if (renderCam.zoom < 0.95) return;
-    for (const node of visibleNodes) {
-      for (const alb of node.albums.slice(0, 6)) {
+    const queued = new Set<string>();
+    for (const instance of renderInstances) {
+      for (const alb of instance.node.albums.slice(0, 6)) {
+        if (queued.has(alb.cover_key)) continue;
+        queued.add(alb.cover_key);
         requestCover({
           coverKey: alb.cover_key,
           folderPath: alb.folder_path,
@@ -162,7 +309,7 @@ export const SpatialSurface2D: React.FC<{
         });
       }
     }
-  }, [visibleNodes, renderCam.zoom, requestCover]);
+  }, [renderInstances, renderCam.zoom, requestCover]);
 
   const handleWheel = useCallback((e: React.WheelEvent) => {
     e.preventDefault();
@@ -173,7 +320,7 @@ export const SpatialSurface2D: React.FC<{
     const mouseY = rect ? e.clientY - rect.top - rect.height / 2 : 0;
     const worldX = mouseX / c.zoom - c.x;
     const worldY = mouseY / c.zoom - c.y;
-    const nextZoom = Math.min(3.2, Math.max(0.28, c.zoom * (e.deltaY < 0 ? 1.13 : 0.885)));
+    const nextZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, c.zoom * (e.deltaY < 0 ? 1.13 : 0.885)));
     c.zoom = nextZoom;
     c.x = mouseX / nextZoom - worldX;
     c.y = mouseY / nextZoom - worldY;
@@ -189,8 +336,6 @@ export const SpatialSurface2D: React.FC<{
       await playTracks(tracks, Math.floor(Math.random() * tracks.length));
     } else await playTracks(tracks, 0);
   };
-
-  const showCoversLayer = renderCam.zoom >= 0.95;
 
   return (
     <div
@@ -219,23 +364,26 @@ export const SpatialSurface2D: React.FC<{
       }}
     >
       <canvas ref={canvasRef} width={viewportSize.w} height={viewportSize.h} style={{ position: "absolute", inset: 0, pointerEvents: "none" }} />
+
       <div style={{
         position: "absolute", left: "50%", top: "50%",
         transform: `translate3d(${renderCam.x * renderCam.zoom}px, ${renderCam.y * renderCam.zoom}px, 0) scale(${renderCam.zoom})`,
         transformOrigin: "0 0", willChange: "transform",
       }}>
-        {visibleNodes.map((node) => {
-          const { artist, albums: artAlbums } = node;
-          const isHovered = hoveredArtistKey === artist.artist_key;
+        {renderInstances.map((instance) => {
+          const { artist, albums: artAlbums } = instance.node;
+          const isHovered = hoveredInstanceId === instance.id;
           const fontSize = Math.round(18 + artist.weight * 26);
           return (
             <div
-              key={artist.artist_key}
-              onMouseEnter={() => setHoveredArtistKey(artist.artist_key)}
-              onMouseLeave={() => setHoveredArtistKey(null)}
+              key={instance.id}
+              onMouseEnter={() => setHoveredInstanceId(instance.id)}
+              onMouseLeave={() => setHoveredInstanceId(null)}
               style={{
-                position: "absolute", left: node.x, top: node.y, width: node.width, padding: "10px 14px",
-                borderRadius: 12, background: isHovered || showCoversLayer ? "rgba(18, 21, 30, 0.78)" : "transparent",
+                position: "absolute", left: instance.worldX, top: instance.worldY, width: instance.node.width,
+                padding: "10px 14px", borderRadius: 12,
+                opacity: instance.opacity, transform: `scale(${instance.scale})`, transformOrigin: "center center",
+                background: isHovered || showCoversLayer ? "rgba(18, 21, 30, 0.78)" : "transparent",
                 border: isHovered ? "1px solid rgba(0, 210, 255, 0.55)" : "1px solid transparent",
               }}
             >
@@ -298,11 +446,21 @@ export const SpatialSurface2D: React.FC<{
         })}
       </div>
 
+      <div style={{
+        position: "absolute", inset: 0, pointerEvents: "none",
+        background: "radial-gradient(ellipse 84% 78% at 50% 50%, rgba(0,0,0,0) 50%, rgba(4,5,10,0.34) 74%, rgba(3,4,8,0.78) 100%)",
+      }} />
+
       <div style={{ position: "absolute", bottom: 18, right: 18, display: "flex", alignItems: "center", gap: 6, background: "rgba(12, 14, 22, 0.88)", border: "1px solid var(--border-subtle)", padding: "6px 10px", borderRadius: 8 }}>
-        <button onClick={() => { camRef.current.zoom = Math.max(0.3, camRef.current.zoom * 0.8); }} style={{ background: "transparent", border: "none", color: "#fff", cursor: "pointer" }}><ZoomOut size={15} /></button>
+        <button onClick={() => { camRef.current.zoom = Math.max(MIN_ZOOM, camRef.current.zoom * 0.8); }} style={{ background: "transparent", border: "none", color: "#fff", cursor: "pointer" }}><ZoomOut size={15} /></button>
         <span style={{ minWidth: 48, textAlign: "center", color: "#00d2ff", fontWeight: 700, fontSize: 12 }}>{Math.round(renderCam.zoom * 100)}%</span>
-        <button onClick={() => { camRef.current.zoom = Math.min(3.0, camRef.current.zoom * 1.25); }} style={{ background: "transparent", border: "none", color: "#fff", cursor: "pointer" }}><ZoomIn size={15} /></button>
-        <button onClick={() => { camRef.current.x = 0; camRef.current.y = 0; camRef.current.zoom = 0.85; }} style={{ background: "transparent", border: "none", color: "#fff", cursor: "pointer" }}><Maximize2 size={14} /></button>
+        <button onClick={() => { camRef.current.zoom = Math.min(MAX_ZOOM, camRef.current.zoom * 1.25); }} style={{ background: "transparent", border: "none", color: "#fff", cursor: "pointer" }}><ZoomIn size={15} /></button>
+        <button onClick={() => {
+          const c = camRef.current;
+          c.x = 0; c.y = 0; c.zoom = 0.85;
+          c.targetX = null; c.targetY = null; c.targetZoom = null;
+          c.vx = 0; c.vy = 0;
+        }} style={{ background: "transparent", border: "none", color: "#fff", cursor: "pointer" }}><Maximize2 size={14} /></button>
       </div>
     </div>
   );

@@ -12,6 +12,8 @@ const SUPPORTED_AUDIO_EXTS: &[&str] = &[
     "mp3", "flac", "ogg", "opus", "m4a", "aac", "wav", "wv", "aiff", "alac",
 ];
 
+const JUNK_PATH_MARKERS: &[&str] = &["freac", "notifier", "thumbs.db", ".cue", ".log", ".m3u"];
+
 #[derive(Clone, Serialize)]
 pub struct ScanProgressEvent {
     pub phase: String,
@@ -27,6 +29,11 @@ fn is_audio_file(path: &Path) -> bool {
         .and_then(|e| e.to_str())
         .map(|ext| SUPPORTED_AUDIO_EXTS.contains(&ext.to_ascii_lowercase().as_str()))
         .unwrap_or(false)
+}
+
+fn is_junk_path(path: &Path) -> bool {
+    let lower = path.to_string_lossy().to_lowercase();
+    JUNK_PATH_MARKERS.iter().any(|marker| lower.contains(marker))
 }
 
 pub fn scan_roots_into_db(
@@ -47,7 +54,7 @@ pub fn scan_roots_into_db(
             if let Ok(entry) = entry_res {
                 if entry.file_type().is_file() {
                     let path = entry.path();
-                    if is_audio_file(&path) {
+                    if is_audio_file(&path) && !is_junk_path(&path) {
                         let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
                         let display_path = strip_long_path_prefix(&path);
                         discovered_entries.push((display_path, size));
@@ -105,4 +112,29 @@ fn strip_long_path_prefix(path: &Path) -> PathBuf {
         return PathBuf::from(local);
     }
     path.to_path_buf()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn test_supported_audio_extensions_only() {
+        assert!(is_audio_file(Path::new(r"D:\Musique\Alpha Blondy\01 - Jerusalem.flac")));
+        assert!(is_audio_file(Path::new(r"D:\Musique\Album\piste.MP3")));
+        assert!(!is_audio_file(Path::new(r"D:\Musique\album.cue")));
+        assert!(!is_audio_file(Path::new(r"D:\Musique\freac.extension.notifier")));
+        assert!(!is_audio_file(Path::new(r"D:\Musique\Album\Thumbs.db")));
+    }
+
+    #[test]
+    fn test_tool_and_system_files_are_rejected() {
+        assert!(is_junk_path(Path::new(r"D:\Musique\freac.extension.notifier")));
+        assert!(is_junk_path(Path::new(r"D:\Musique\Album\Thumbs.db")));
+        assert!(is_junk_path(Path::new(r"D:\Musique\Album\album.cue")));
+        assert!(is_junk_path(Path::new(r"D:\Musique\Album\rip.log")));
+        assert!(is_junk_path(Path::new(r"D:\Musique\Album\playlist.m3u")));
+        assert!(!is_junk_path(Path::new(r"D:\Musique\Alpha Blondy\1994 - Jerusalem\01 - Jerusalem.flac")));
+    }
 }
