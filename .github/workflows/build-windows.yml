@@ -1,0 +1,65 @@
+name: Build Windows Release (.exe)
+
+on:
+  push:
+    branches: [ "main", "master" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Rust Stable Toolchain (x86_64-pc-windows-msvc)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust Cargo Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install Frontend Dependencies
+        run: npm install
+
+      - name: Verify Frontend Typecheck
+        run: npx tsc --noEmit
+
+      - name: Run Rust Unit Tests (Gauntlet Verification)
+        working-directory: ./src-tauri
+        run: cargo test --release
+
+      - name: Build Tauri Windows Application (.exe & NSIS Installer)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__
+          releaseName: 'n7-Folder Music Player v__VERSION__'
+          releaseBody: 'Automated Windows x64 Standalone & Installer Build (Gauntlet Verified).'
+          releaseDraft: false
+          prerelease: false
+          args: --target x86_64-pc-windows-msvc --bundles nsis
+
+      - name: Upload Standalone & Installer Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: n7FolderPlayer-Windows-x64-Exe
+          path: |
+            src-tauri/target/x86_64-pc-windows-msvc/release/n7-folder-player.exe
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe

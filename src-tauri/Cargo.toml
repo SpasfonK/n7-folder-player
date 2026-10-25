@@ -1,0 +1,51 @@
+[package]
+name = "n7-folder-player"
+version = "1.0.0"
+description = "n7-Folder Desktop Music Player - Spatial 2D Tag Cloud & Heuristic Folder Engine"
+authors = ["Architecte & Lead Dev"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.77.2"
+
+[build-dependencies]
+tauri-build = { version = "2.0.0", features = [] }
+
+[dependencies]
+tauri = { version = "2.0.0", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2.0.0"
+tauri-plugin-fs = "2.0.0"
+tauri-plugin-shell = "2.0.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.40", features = ["full"] }
+jwalk = "0.8"
+rayon = "1.10"
+rusqlite = { version = "0.32", features = ["bundled"] }
+deunicode = "1.6"
+regex = "1.11"
+once_cell = "1.20"
+lofty = "0.21"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+rodio = { version = "0.19", default-features = false, features = ["symphonia-all"] }
+rustfft = "6.2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+sha2 = "0.10"
+hex = "0.4"
+parking_lot = "0.12"
+thiserror = "1.0"
+dunce = "1.0"
+window-vibrancy = "0.5"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading"
+] }
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = 3
+strip = true
